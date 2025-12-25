@@ -3,20 +3,11 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from typing import Iterable
 
 from vozdipovo_app.db.schema import SCHEMA
 
 
 def connect(db_path: str) -> sqlite3.Connection:
-    """Abre ligação sqlite com pragmas essenciais.
-
-    Args:
-        db_path: Caminho da base.
-
-    Returns:
-        Ligação sqlite.
-    """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -36,36 +27,30 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, col_def: str) -
     return True
 
 
-def _index_exists(conn: sqlite3.Connection, index_name: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='index' AND name=? LIMIT 1;",
-        (index_name,),
-    ).fetchone()
-    return row is not None
-
-
-def _ensure_index(conn: sqlite3.Connection, sql: str, index_name: str) -> bool:
-    if _index_exists(conn, index_name):
-        return False
-    conn.execute(sql)
-    return True
-
-
 def _ensure_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
 
 
+def _ensure_unique_indexes(conn: sqlite3.Connection) -> bool:
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_news_articles_legal_doc_id_unique
+        ON news_articles(legal_doc_id);
+        """
+    )
+    return True
+
+
 def _apply_migrations(conn: sqlite3.Connection) -> list[str]:
     applied: list[str] = []
-
-    existing_tables = {
+    tables = {
         r[0]
         for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table';"
         ).fetchall()
     }
 
-    if "legal_docs" in existing_tables:
+    if "legal_docs" in tables:
         for col_def in (
             "url_hash TEXT",
             "pub_date TEXT",
@@ -79,30 +64,18 @@ def _apply_migrations(conn: sqlite3.Connection) -> list[str]:
             if _add_column_if_missing(conn, "legal_docs", col_def):
                 applied.append(f"add_column=legal_docs.{col_def.split()[0]}")
 
-    if "news_articles" in existing_tables:
+    if "news_articles" in tables:
         for col_def in ("decision TEXT",):
             if _add_column_if_missing(conn, "news_articles", col_def):
                 applied.append(f"add_column=news_articles.{col_def.split()[0]}")
 
-        if _ensure_index(
-            conn,
-            "CREATE UNIQUE INDEX idx_news_articles_legal_doc_id_uq ON news_articles(legal_doc_id);",
-            "idx_news_articles_legal_doc_id_uq",
-        ):
-            applied.append("add_index=idx_news_articles_legal_doc_id_uq")
+        _ensure_unique_indexes(conn)
+        applied.append("ensure_unique_index=news_articles.legal_doc_id")
 
     return applied
 
 
 def ensure_schema(db_path: str) -> sqlite3.Connection:
-    """Garante schema e migrações.
-
-    Args:
-        db_path: Caminho da base.
-
-    Returns:
-        Ligação sqlite.
-    """
     conn = connect(db_path)
     _ensure_tables(conn)
     applied = _apply_migrations(conn)
@@ -112,14 +85,6 @@ def ensure_schema(db_path: str) -> sqlite3.Connection:
 
 
 def recreate_schema(db_path: str) -> sqlite3.Connection:
-    """Recria schema do zero.
-
-    Args:
-        db_path: Caminho da base.
-
-    Returns:
-        Ligação sqlite.
-    """
     if os.path.exists(db_path):
         os.remove(db_path)
     conn = connect(db_path)
@@ -129,6 +94,11 @@ def recreate_schema(db_path: str) -> sqlite3.Connection:
 
 
 if __name__ == "__main__":
-    p = os.path.join(os.getcwd(), "tmp_test.db")
-    c = recreate_schema(p)
-    c.close()
+    from vozdipovo_app.settings import get_settings
+
+    s = get_settings()
+    c = ensure_schema(str(s.db_path))
+    try:
+        print("ok")
+    finally:
+        c.close()

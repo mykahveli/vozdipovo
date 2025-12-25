@@ -1,114 +1,153 @@
-#!filepath: src/vozdipovo_app/news_pipeline.py
+#!src/vozdipovo_app/news_pipeline.py
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from vozdipovo_app.editorial.config import get_editorial_config
-from vozdipovo_app.llm.models import ChatMessage, ChatRequest
 from vozdipovo_app.llm.rotator import LLMRotator
-from vozdipovo_app.utils.backoff import (
-    call_with_exponential_backoff,
-    is_retryable_llm_error,
-)
+from vozdipovo_app.llm.stage_client import get_stage_client_reporter
 from vozdipovo_app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
-class TokenBudget:
-    model_name: str
-    max_tokens: int
-
-    def estimate_tokens(self, text: str) -> int:
-        try:
-            import tiktoken
-
-            enc = tiktoken.encoding_for_model(self.model_name)
-            return len(enc.encode(text))
-        except Exception:
-            return max(1, len(text) // 4)
-
-    def truncate_to_budget(self, text: str) -> str:
-        if not text:
-            return ""
-        est = self.estimate_tokens(text)
-        if est <= self.max_tokens:
-            return text
-        ratio = float(self.max_tokens) / float(max(1, est))
-        keep = max(1, int(len(text) * ratio))
-        return text[:keep]
+class ReporterDraft:
+    titulo: str
+    texto_completo_md: str
+    factos_nucleares: list[str]
+    fontes_mencionadas: list[str]
+    keywords: list[str]
+    categoria_tematica: str
+    subcategoria: str
+    reporter_payload_json: str
+    reviewed_by_model: str
 
 
-def _strict_json_dict(text: str) -> Dict[str, Any]:
-    raw = str(text or "").strip()
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise ValueError("Resposta não é um objeto JSON.")
-    return data
+def _coerce_list_str(v: Any) -> list[str]:
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    s = str(v).strip()
+    return [s] if s else []
 
 
-def generate_one(
-    cfg: Dict[str, Any],
-    legal_doc_id: int,
-    prompt_path: str,
-    *,
-    conn: sqlite3.Connection,
-    rotator: LLMRotator,
-    model_name_for_budget: str = "gpt-4o-mini",
-) -> Dict[str, Any]:
-    prompt_file = Path(prompt_path)
-    template = prompt_file.read_text(encoding="utf-8")
+def _coerce_str(v: Any) -> str:
+    return str(v or "").strip()
 
+
+def _allowed_keys() -> list[str]:
+    return [
+        "titulo",
+        "texto_completo_md",
+        "factos_nucleares",
+        "fontes_mencionadas",
+        "keywords",
+        "categoria_tematica",
+        "subcategoria",
+    ]
+
+
+def _load_source(conn: sqlite3.Connection, legal_doc_id: int) -> dict[str, str]:
     row = conn.execute(
-        "SELECT title, summary, text, site_name, act_type FROM legal_docs WHERE id=?",
+        """
+        SELECT
+          site_name,
+          act_type,
+          title,
+          summary,
+          content_text,
+          url,
+          pub_date,
+          published_at
+        FROM legal_docs
+        WHERE id=?
+        """,
         (legal_doc_id,),
     ).fetchone()
     if not row:
+        return {}
+
+    title = _coerce_str(row["title"])
+    summary = _coerce_str(row["summary"])
+    body = _coerce_str(row["content_text"])
+    url = _coerce_str(row["url"])
+    act_type = _coerce_str(row["act_type"])
+    site_name = _coerce_str(row["site_name"])
+    pub_date = _coerce_str(row["pub_date"] or row["published_at"])
+
+    merged = "\n\n".join([x for x in [title, summary, body] if x]).strip()
+    if url:
+        merged = f"{merged}\n\nURL: {url}".strip()
+    if pub_date:
+        merged = f"{merged}\n\nDATA: {pub_date}".strip()
+
+    return {
+        "site_name": site_name,
+        "act_type": act_type,
+        "title": title,
+        "corpo": merged,
+    }
+
+
+def generate_one(
+    app_cfg: dict[str, Any],
+    legal_doc_id: int,
+    prompt_path: str,
+    conn: sqlite3.Connection,
+    rotator: Optional[LLMRotator] = None,
+) -> dict[str, Any]:
+    _ = rotator
+
+    src = _load_source(conn, legal_doc_id)
+    if not src:
         raise RuntimeError(f"Fonte não encontrada, legal_doc_id={legal_doc_id}")
 
-    titulo = str(row["title"] or "")
-    corpo = "\n\n".join(
-        [str(row["summary"] or "").strip(), str(row["text"] or "").strip()]
-    ).strip()
-    site_name = str(row["site_name"] or "")
-    act_type = str(row["act_type"] or "")
+    reporter = get_stage_client_reporter()
+    title = src.get("title", "")
+    corpo = src.get("corpo", "")
+    site_name = src.get("site_name", "")
+    act_type = src.get("act_type", "")
 
-    budget = TokenBudget(model_name=model_name_for_budget, max_tokens=3000)
-    corpo = budget.truncate_to_budget(corpo)
-
-    prompt = (
-        template.replace("{{TITULO}}", titulo)
-        .replace("{{CORPO}}", corpo)
-        .replace("{{SITE_NAME}}", site_name)
-        .replace("{{ACT_TYPE}}", act_type)
+    res = reporter.run_json(
+        prompt_path=prompt_path,
+        template_vars={
+            "TITULO": title,
+            "CORPO": corpo,
+            "KEYWORDS": "",
+            "SITE_NAME": site_name,
+            "ACT_TYPE": act_type,
+        },
+        allowed_keys=_allowed_keys(),
     )
 
-    def _call_once() -> str:
-        req = ChatRequest(
-            model="",
-            messages=[ChatMessage(role="user", content=prompt)],
-            temperature=0.4,
-            response_format={"type": "json_object"},
+    payload = res.data if isinstance(res.data, dict) else {}
+    payload["reviewed_by_model"] = f"{res.provider_used}:{res.model_used}".strip(":")
+    payload["reporter_payload_json"] = res.raw_text or ""
+    return payload
+
+
+if __name__ == "__main__":
+    import sqlite3
+
+    from vozdipovo_app.settings import get_settings
+
+    settings = get_settings()
+    conn = sqlite3.connect(str(settings.db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        out = generate_one(
+            app_cfg=settings.app_cfg,
+            legal_doc_id=1,
+            prompt_path=str(
+                settings.app_cfg.get("paths", {}).get(
+                    "prompt", "configs/prompts/reporter.md"
+                )
+            ),
+            conn=conn,
         )
-        resp = rotator.chat(req)
-        packed = {"_model": f"{resp.provider}/{resp.model}", "_content": resp.content}
-        return json.dumps(packed, ensure_ascii=False)
-
-    packed = call_with_exponential_backoff(
-        _call_once,
-        max_retries=6,
-        base_delay=1.0,
-        max_delay=40.0,
-        is_retryable=is_retryable_llm_error,
-        logger=logger,
-    )
-    wrapper = _strict_json_dict(packed)
-    content = str(wrapper.get("_content") or "")
-    data = _strict_json_dict(content)
-    data["writer_model_used"] = str(wrapper.get("_model") or "")
-    return data
+        print(out.keys())
+    finally:
+        conn.close()

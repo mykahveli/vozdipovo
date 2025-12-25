@@ -70,18 +70,45 @@ def _parse_args(argv: Optional[list[str]] = None) -> DoctorArgs:
     )
 
 
+def _normalize_stage_name(stage: str) -> str:
+    s = str(stage or "").strip().casefold()
+    aliases: dict[str, str] = {
+        "scraping": "scraping",
+        "scrape": "scraping",
+        "judging": "judging",
+        "judge": "judging",
+        "julgamento": "judging",
+        "judging_stage": "judging",
+        "generation": "generation",
+        "generate": "generation",
+        "geracao": "generation",
+        "geração": "generation",
+        "revisao": "revision",
+        "revisão": "revision",
+        "revision": "revision",
+        "revising": "revision",
+        "publishing": "publishing",
+        "publish": "publishing",
+        "publicacao": "publishing",
+        "publicação": "publishing",
+        "curadoria": "curation",
+        "curation": "curation",
+        "curating": "curation",
+        "audio": "audio",
+        "áudio": "audio",
+    }
+    return aliases.get(s, s)
+
+
 def _lazy_stage_factory(stage: str) -> Callable[[], Any]:
-    m = str(stage).strip().lower()
+    m = _normalize_stage_name(stage)
     mapping = {
         "scraping": "vozdipovo_app.modules.scraping_stage.ScrapingStage",
         "judging": "vozdipovo_app.modules.judging_stage.JudgingStage",
         "generation": "vozdipovo_app.modules.generation_stage.GenerationStage",
-        "revising": "vozdipovo_app.modules.revision_stage.RevisionStage",
         "revision": "vozdipovo_app.modules.revision_stage.RevisionStage",
-        "revisao": "vozdipovo_app.modules.revision_stage.RevisionStage",
         "publishing": "vozdipovo_app.modules.publishing_stage.PublishingStage",
         "curation": "vozdipovo_app.modules.curation_stage.CurationStage",
-        "curadoria": "vozdipovo_app.modules.curation_stage.CurationStage",
         "audio": "vozdipovo_app.modules.audio_stage.AudioStage",
     }
     dotted = mapping.get(m)
@@ -118,17 +145,17 @@ def _instantiate_stage(
 ) -> Any:
     sig = inspect.signature(stage_cls.__init__)
     params = {p.name for p in sig.parameters.values() if p.name != "self"}
-
     kwargs: dict[str, Any] = {}
 
-    if "site_filter" in params and args.stage.strip().lower() == "scraping":
+    if "site_filter" in params and _normalize_stage_name(args.stage) == "scraping":
         kwargs["site_filter"] = args.site
 
     if "limit" in params:
+        default_limit_key = f"{_normalize_stage_name(args.stage)}_limit"
         kwargs["limit"] = int(
             args.limit
             if args.limit is not None
-            else int(_cfg_default(settings, "judging_limit", 50))
+            else int(_cfg_default(settings, default_limit_key, 50))
         )
 
     if "throttle_seconds" in params:
@@ -176,7 +203,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         base_mod = __import__("vozdipovo_app.modules.base", fromlist=["StageContext"])
         ctx = base_mod.StageContext(
-            conn=conn, app_cfg=settings.app_cfg, editorial=settings.editorial
+            conn=conn,
+            app_cfg=settings.app_cfg,
+            editorial=settings.editorial,
         )
 
         stage_cls = _lazy_stage_factory(args.stage)()

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 from vozdipovo_app.director import (
@@ -43,20 +42,27 @@ def evaluate_article_significance(
         source_name=source_name or "",
     )
 
-    scores = (
-        res.scores.model_dump()
-        if hasattr(res.scores, "model_dump")
-        else res.scores.dict()
-    )
+    scores_obj = getattr(res, "scores", None)
+    if scores_obj is None:
+        scores: dict[str, Any] = {}
+    elif hasattr(scores_obj, "model_dump"):
+        scores = scores_obj.model_dump()
+    elif hasattr(scores_obj, "dict"):
+        scores = scores_obj.dict()
+    else:
+        scores = dict(scores_obj) if isinstance(scores_obj, dict) else {}
 
-    reviewed_at = datetime.now(timezone.utc).isoformat()
+    justification = getattr(res, "justification", "") or ""
+    provider_used = getattr(res, "provider_used", "") or ""
+    model_used = getattr(res, "model_used", "") or ""
+    reviewed_at = getattr(res, "reviewed_at", None)
 
     payload: dict[str, Any] = {
         **scores,
-        "final_score": float(res.final_score),
-        "score_editorial": float(res.editorial_score),
-        "judge_justification": str(getattr(res.scores, "justification", "") or ""),
-        "reviewed_by_model": f"{res.provider_used}:{res.model_used}",
+        "final_score": float(getattr(res, "final_score", 0.0) or 0.0),
+        "score_editorial": float(getattr(res, "editorial_score", 0.0) or 0.0),
+        "judge_justification": str(justification),
+        "reviewed_by_model": f"{provider_used}:{model_used}".strip(":"),
         "reviewed_at": reviewed_at,
     }
     return payload
@@ -65,9 +71,7 @@ def evaluate_article_significance(
 if __name__ == "__main__":
     out = evaluate_article_significance(
         title="Teste",
-        text_snippet="Um texto curto de teste.",
-        source_name="teste",
-        keywords="teste",
-        url="https://example.com",
+        text_snippet="Texto curto para teste",
+        source_name="governo_cv",
     )
-    print(out.keys())
+    print(out)

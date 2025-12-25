@@ -97,10 +97,7 @@ CREATE TABLE IF NOT EXISTS news_articles (
   FOREIGN KEY (legal_doc_id) REFERENCES legal_docs(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_news_articles_legal_doc_id
-ON news_articles(legal_doc_id);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_news_articles_legal_doc_id_uq
+CREATE UNIQUE INDEX IF NOT EXISTS idx_news_articles_legal_doc_id_unique
 ON news_articles(legal_doc_id);
 
 CREATE INDEX IF NOT EXISTS idx_news_articles_review_status

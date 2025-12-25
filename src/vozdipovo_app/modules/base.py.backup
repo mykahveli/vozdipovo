@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from typing import Protocol, Optional, Any
+from typing import Protocol
 
 from vozdipovo_app.editorial.models import EditorialConfig
 
@@ -26,4 +26,3 @@ class StageContext:
     conn: sqlite3.Connection
     app_cfg: dict
     editorial: EditorialConfig
-    rotator: Optional[Any] = None  # LLM rotator for stage

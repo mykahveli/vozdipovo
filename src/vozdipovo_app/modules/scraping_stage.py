@@ -1,17 +1,21 @@
 #!src/vozdipovo_app/modules/scraping_stage.py
 from __future__ import annotations
 
-import importlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Type
 
 from vozdipovo_app.modules.base import Stage, StageContext
 from vozdipovo_app.scrapers.base import BaseScraper
+from vozdipovo_app.scrapers.bo_scraper import BOScraper
+from vozdipovo_app.scrapers.nextjs_scraper import NextJsScraper
+from vozdipovo_app.scrapers.rss_scraper import RssScraper
 from vozdipovo_app.utils.logger import get_logger
 from vozdipovo_app.utils.serialization import load_yaml_dict
 
 logger = get_logger(__name__)
+
+MAX_ATTEMPTS_PER_SITE = 2
 
 
 def _load_sites(path: Path) -> list[dict[str, Any]]:
@@ -32,32 +36,25 @@ def _load_sites(path: Path) -> list[dict[str, Any]]:
     return [s for s in sites if isinstance(s, dict)]
 
 
-def _load_scraper_class(dotted: str) -> type[BaseScraper]:
-    mod_name, attr = str(dotted).rsplit(".", 1)
-    mod = importlib.import_module(mod_name)
-    Scraper = getattr(mod, attr)
-    if not isinstance(Scraper, type):
-        raise TypeError(f"Scraper inválido, dotted={dotted}")
-    return Scraper
+def _sites_path_from_cfg(app_cfg: dict[str, Any]) -> Path:
+    p = Path(str(app_cfg.get("paths", {}).get("sites", "configs/sites.yaml")))
+    if p.exists():
+        return p
+    fallback = Path("configs/sites.yaml")
+    return fallback
 
 
-@dataclass(frozen=True, slots=True)
-class SiteRunResult:
-    """Resultado de uma tentativa de scraping por site."""
-
-    site_name: str
-    site_type: str
-    attempt: int
-    inserted: int
-    skipped: int
-    errors: int
-    ok: bool
-    error_message: Optional[str] = None
+def _scraper_map() -> dict[str, Type[BaseScraper]]:
+    return {
+        "rss": RssScraper,
+        "html": BOScraper,
+        "nextjs": NextJsScraper,
+    }
 
 
 @dataclass(frozen=True, slots=True)
 class ScrapingStage(Stage):
-    """Executa scraping seguindo a ordem em sites.yaml, com retry por falha."""
+    """Executa scraping por site seguindo a ordem do sites.yaml, com requeue e retry."""
 
     ctx: StageContext
     site_filter: Optional[str] = None
@@ -66,113 +63,30 @@ class ScrapingStage(Stage):
     def normalized_site_filter(self) -> str:
         return str(self.site_filter or "").strip().casefold()
 
-    def run(self) -> int:
-        cfg = self.ctx.app_cfg
-        sites_path = Path(str(cfg.get("paths", {}).get("sites", "configs/sites.yaml")))
-        if not sites_path.exists():
-            sites_path = Path("configs/sites.yaml")
-
+    def _select_sites(self) -> list[dict[str, Any]]:
+        cfg = self.ctx.app_cfg if isinstance(self.ctx.app_cfg, dict) else {}
+        sites_path = _sites_path_from_cfg(cfg)
         sites = _load_sites(sites_path)
-        if not sites:
-            return 0
-
-        scraper_dotted = {
-            "rss": "vozdipovo_app.scrapers.rss_scraper.RssScraper",
-            "html": "vozdipovo_app.scrapers.bo_scraper.BOScraper",
-            "nextjs": "vozdipovo_app.scrapers.nextjs_scraper.NextJsScraper",
-        }
-
         wanted = self.normalized_site_filter
-        ordered = self._select_sites_in_order(sites, wanted)
-        if wanted and not ordered:
-            logger.error(
-                f"Filtro de site não correspondeu a nenhum site, site_filter={self.site_filter}"
-            )
-            return 0
-
-        results: list[SiteRunResult] = []
-        retry_queue: list[dict[str, Any]] = []
-
-        inserted_total = 0
-
-        for site in ordered:
-            r = self._run_one(site, attempt=1, scraper_dotted=scraper_dotted)
-            results.append(r)
-            inserted_total += int(r.inserted)
-            if not r.ok:
-                retry_queue.append(site)
-
-        if retry_queue:
-            for site in retry_queue:
-                r = self._run_one(site, attempt=2, scraper_dotted=scraper_dotted)
-                results.append(r)
-                inserted_total += int(r.inserted)
-
-        self._log_summary(results)
-        return inserted_total
-
-    def _select_sites_in_order(
-        self, sites: list[dict[str, Any]], wanted: str
-    ) -> list[dict[str, Any]]:
         if not wanted:
-            return [s for s in sites if self._site_has_name(s)]
-        out: list[dict[str, Any]] = []
-        for s in sites:
-            name = str(s.get("name") or "").strip()
-            if name.casefold() == wanted:
-                out.append(s)
-        return out
+            return sites
+        return [
+            s for s in sites if str(s.get("name") or "").strip().casefold() == wanted
+        ]
 
-    def _site_has_name(self, site: dict[str, Any]) -> bool:
-        return bool(str(site.get("name") or "").strip())
-
-    def _run_one(
-        self,
-        site: dict[str, Any],
-        *,
-        attempt: int,
-        scraper_dotted: dict[str, str],
-    ) -> SiteRunResult:
+    def _run_one(self, site: dict[str, Any]) -> tuple[int, int, int, bool]:
         name = str(site.get("name") or "").strip()
         s_type = str(site.get("type") or "").strip().lower()
         s_cfg = site.get("config") if isinstance(site.get("config"), dict) else {}
 
-        dotted = scraper_dotted.get(s_type)
-        if not dotted:
-            msg = f"Tipo de scraper desconhecido, site={name}, type={s_type}"
-            logger.warning(msg)
-            return SiteRunResult(
-                site_name=name,
-                site_type=s_type,
-                attempt=int(attempt),
-                inserted=0,
-                skipped=0,
-                errors=1,
-                ok=False,
-                error_message=msg,
-            )
-
-        logger.info(f"Scraper a iniciar, site={name}, type={s_type}, attempt={attempt}")
+        Scraper = _scraper_map().get(s_type)
+        if not Scraper:
+            logger.warning(f"Tipo de scraper desconhecido, site={name}, type={s_type}")
+            return 0, 0, 1, False
 
         try:
-            Scraper = _load_scraper_class(dotted)
-        except Exception as e:
-            msg = f"Falha no import do scraper, site={name}, type={s_type}, err={e}"
-            logger.error(msg, exc_info=True)
-            return SiteRunResult(
-                site_name=name,
-                site_type=s_type,
-                attempt=int(attempt),
-                inserted=0,
-                skipped=0,
-                errors=1,
-                ok=False,
-                error_message=msg,
-            )
-
-        try:
-            scraper = Scraper(name, dict(s_cfg or {}), self.ctx.conn)
-            stats = scraper.run()
+            logger.info(f"Scraper a iniciar, site={name}, type={s_type}")
+            stats = Scraper(name, s_cfg, self.ctx.conn).run()
             inserted = int(stats.get("inserted", 0))
             skipped = int(stats.get("skipped", 0))
             errors = int(stats.get("errors", 0))
@@ -180,70 +94,63 @@ class ScrapingStage(Stage):
             logger.info(
                 f"Scraper terminou, site={name}, inserted={inserted}, skipped={skipped}, errors={errors}"
             )
-            return SiteRunResult(
-                site_name=name,
-                site_type=s_type,
-                attempt=int(attempt),
-                inserted=inserted,
-                skipped=skipped,
-                errors=errors,
-                ok=ok,
-            )
-        except Exception as e:
-            msg = f"Falha a executar scraper, site={name}, type={s_type}, err={e}"
-            logger.error(msg, exc_info=True)
-            return SiteRunResult(
-                site_name=name,
-                site_type=s_type,
-                attempt=int(attempt),
-                inserted=0,
-                skipped=0,
-                errors=1,
-                ok=False,
-                error_message=msg,
-            )
+            return inserted, skipped, errors, ok
+        except Exception:
+            logger.error(f"Scraper falhou com exceção, site={name}", exc_info=True)
+            return 0, 0, 1, False
 
-    def _log_summary(self, results: list[SiteRunResult]) -> None:
-        if not results:
-            logger.info("Scraping terminou sem sites")
-            return
+    def run(self) -> int:
+        sites = self._select_sites()
+        if not sites:
+            logger.info("Nenhum site configurado para scraping.")
+            return 0
 
-        by_site: dict[str, list[SiteRunResult]] = {}
-        for r in results:
-            by_site.setdefault(r.site_name, []).append(r)
+        queue: list[dict[str, Any]] = list(sites)
+        inserted_total = 0
+        failures: list[dict[str, Any]] = []
 
-        logger.info("Resumo de scraping")
-        for site_name in [str(s) for s in by_site.keys()]:
-            attempts = by_site.get(site_name, [])
-            last = attempts[len(attempts) - 1] if attempts else None
-            if not last:
-                continue
-            if last.ok:
-                logger.info(
-                    f"Site ok, site={site_name}, attempts={len(attempts)}, inserted={last.inserted}, skipped={last.skipped}, errors={last.errors}"
-                )
-            else:
-                logger.warning(
-                    f"Site falhou, site={site_name}, attempts={len(attempts)}, inserted={last.inserted}, skipped={last.skipped}, errors={last.errors}, err={last.error_message}"
-                )
+        for s in queue:
+            inserted, _, _, ok = self._run_one(s)
+            inserted_total += inserted
+            if not ok:
+                failures.append(s)
+
+        if not failures:
+            return inserted_total
+
+        logger.warning(f"Requeue ativo, sites_com_falha={len(failures)}, attempts=2")
+
+        retry_failures: list[dict[str, Any]] = []
+        for s in failures:
+            inserted, _, _, ok = self._run_one(s)
+            inserted_total += inserted
+            if not ok:
+                retry_failures.append(s)
+
+        if retry_failures:
+            names = [str(s.get("name") or "").strip() for s in retry_failures]
+            logger.error(f"Falhas persistentes após retry, sites={names}")
+
+        return inserted_total
 
 
 if __name__ == "__main__":
     import sqlite3
 
-    from vozdipovo_app.db.migrate import ensure_schema
     from vozdipovo_app.settings import get_settings
 
     settings = get_settings()
-    conn = ensure_schema(str(settings.db_path))
-
+    conn = sqlite3.connect(str(settings.db_path))
+    conn.row_factory = sqlite3.Row
     try:
-        ctx = StageContext(
-            conn=conn, app_cfg=settings.app_cfg, editorial=settings.editorial
+        stage = ScrapingStage(
+            ctx=StageContext(
+                conn=conn, app_cfg=settings.app_cfg, editorial=settings.editorial
+            ),
+            site_filter=None,
         )
-        stage = ScrapingStage(ctx=ctx)
         processed = stage.run()
         conn.commit()
-        logger.info(f"Processed={processed}")
+        logger.info(f"done, processed={processed}")
     finally:
         conn.close()

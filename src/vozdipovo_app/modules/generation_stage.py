@@ -4,68 +4,57 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from vozdipovo_app.article_reviser import revise_article
-from vozdipovo_app.category_rules import CategoryContext, resolve_categoria_tematica
-from vozdipovo_app.editorial.config import get_editorial_config
-from vozdipovo_app.modules.base import Stage, StageContext
+from vozdipovo_app.categories import CategoryContext, resolve_categoria_tematica
+from vozdipovo_app.config_editorial import get_editorial_config
 from vozdipovo_app.news_pipeline import generate_one
+from vozdipovo_app.revision import revise_article
 from vozdipovo_app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 _STOPWORDS = {
     "para",
-    "pela",
     "pelo",
-    "entre",
-    "sobre",
-    "desde",
+    "pela",
+    "pela",
     "como",
-    "onde",
     "quando",
+    "onde",
     "porque",
-    "qual",
-    "quais",
-    "num",
-    "numa",
-    "nos",
-    "nas",
-    "uma",
-    "umas",
-    "uns",
-    "que",
-    "com",
-    "sem",
-    "por",
-    "dos",
-    "das",
-    "aos",
-    "às",
-    "este",
-    "esta",
-    "isso",
-    "isto",
-    "será",
-    "são",
-    "foi",
-    "têm",
-    "tem",
-    "mais",
-    "menos",
-    "muito",
-    "muita",
+    "tambem",
     "também",
 }
-
-_LEGAL_DOCS_CONTENT_COL: str | None = None
 
 
 def _candidates(
     conn: sqlite3.Connection, significance_threshold: float, limit: int
 ) -> Sequence[sqlite3.Row]:
+    if float(significance_threshold or 0.0) > 0.0:
+        return conn.execute(
+            """
+            SELECT
+              a.legal_doc_id,
+              d.site_name,
+              d.act_type
+            FROM news_articles a
+            JOIN legal_docs d ON d.id = a.legal_doc_id
+            WHERE a.decision = 'WRITE'
+              AND a.final_score >= ?
+              AND (
+                  a.review_status = 'JUDGED'
+                  OR a.review_status = 'FAILED'
+                  OR a.review_status IS NULL
+                  OR a.review_status = ''
+              )
+              AND (a.corpo_md IS NULL OR a.corpo_md = '')
+            ORDER BY a.score_editorial DESC, a.final_score DESC
+            LIMIT ?
+            """,
+            (float(significance_threshold), int(limit)),
+        ).fetchall()
+
     return conn.execute(
         """
         SELECT
@@ -74,7 +63,7 @@ def _candidates(
           d.act_type
         FROM news_articles a
         JOIN legal_docs d ON d.id = a.legal_doc_id
-        WHERE a.final_score >= ?
+        WHERE a.decision = 'WRITE'
           AND (
               a.review_status = 'JUDGED'
               OR a.review_status = 'FAILED'
@@ -85,7 +74,7 @@ def _candidates(
         ORDER BY a.score_editorial DESC, a.final_score DESC
         LIMIT ?
         """,
-        (significance_threshold, limit),
+        (int(limit),),
     ).fetchall()
 
 
@@ -119,41 +108,9 @@ def _overlap_stats(source: str, generated: str) -> tuple[int, float]:
     return len(common), ratio
 
 
-def _legal_docs_columns(conn: sqlite3.Connection) -> set[str]:
-    rows = conn.execute("PRAGMA table_info(legal_docs)").fetchall()
-    return {str(r[1]) for r in rows if r and len(r) > 1}
-
-
-def _resolve_legal_docs_content_column(conn: sqlite3.Connection) -> str | None:
-    global _LEGAL_DOCS_CONTENT_COL
-    if _LEGAL_DOCS_CONTENT_COL is not None:
-        return _LEGAL_DOCS_CONTENT_COL
-
-    cols = _legal_docs_columns(conn)
-    for candidate in ("content_text", "text", "raw_payload_json", "raw_html"):
-        if candidate in cols:
-            _LEGAL_DOCS_CONTENT_COL = candidate
-            return _LEGAL_DOCS_CONTENT_COL
-
-    _LEGAL_DOCS_CONTENT_COL = None
-    return None
-
-
 def _source_text(conn: sqlite3.Connection, legal_doc_id: int) -> str:
-    content_col = _resolve_legal_docs_content_column(conn)
-    if not content_col:
-        row = conn.execute(
-            "SELECT title, summary FROM legal_docs WHERE id=?",
-            (legal_doc_id,),
-        ).fetchone()
-        if not row:
-            return ""
-        parts = [str(row["title"] or ""), str(row["summary"] or "")]
-        joined = "\n\n".join([p.strip() for p in parts if str(p).strip()])
-        return joined.strip()
-
     row = conn.execute(
-        f"SELECT title, summary, {content_col} AS content FROM legal_docs WHERE id=?",
+        "SELECT title, summary, content_text FROM legal_docs WHERE id=?",
         (legal_doc_id,),
     ).fetchone()
     if not row:
@@ -161,15 +118,17 @@ def _source_text(conn: sqlite3.Connection, legal_doc_id: int) -> str:
     parts = [
         str(row["title"] or ""),
         str(row["summary"] or ""),
-        str(row["content"] or ""),
+        str(row["content_text"] or ""),
     ]
     joined = "\n\n".join([p.strip() for p in parts if str(p).strip()])
     return joined.strip()
 
 
 @dataclass(frozen=True, slots=True)
-class GenerationStage(Stage):
-    ctx: StageContext
+class GenerationStage:
+    """Gera drafts e aplica revisão, persistindo em news_articles."""
+
+    ctx: Any
     significance_threshold: float
     limit: int
 
@@ -206,7 +165,10 @@ class GenerationStage(Stage):
                     )
 
                 draft = generate_one(
-                    cfg, legal_doc_id, prompt_path, conn=conn, rotator=self.ctx.rotator
+                    cfg,
+                    legal_doc_id,
+                    prompt_path,
+                    conn=conn,
                 )
                 draft_title = _coerce_text(draft.get("titulo"))
                 draft_body = _coerce_text(
@@ -297,14 +259,24 @@ class GenerationStage(Stage):
 
 
 if __name__ == "__main__":
-    import sqlite3 as _sqlite3
+    import sqlite3
 
-    from vozdipovo_app.modules.base import build_stage_context as _build_stage_context
-    from vozdipovo_app.settings import get_settings as _get_settings
+    from vozdipovo_app.modules.base import StageContext
+    from vozdipovo_app.settings import get_settings
 
-    settings = _get_settings()
-    conn = _sqlite3.connect(str(settings.db_path))
-    conn.row_factory = _sqlite3.Row
-    ctx = _build_stage_context(conn)
-    stage = GenerationStage(ctx=ctx, significance_threshold=0.0, limit=5)
-    print(stage.run())
+    settings = get_settings()
+    conn = sqlite3.connect(str(settings.db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        stage = GenerationStage(
+            ctx=StageContext(
+                conn=conn, app_cfg=settings.app_cfg, editorial=settings.editorial
+            ),
+            significance_threshold=0.0,
+            limit=5,
+        )
+        processed = stage.run()
+        conn.commit()
+        print(processed)
+    finally:
+        conn.close()

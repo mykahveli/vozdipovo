@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 
 from vozdipovo_app.editorial.config import get_editorial_config
 from vozdipovo_app.editorial.models import EditorialConfig
+from vozdipovo_app.llm.rotator import LLMRotator
 from vozdipovo_app.utils.logger import get_logger
 from vozdipovo_app.utils.project_paths import ProjectPaths
 
