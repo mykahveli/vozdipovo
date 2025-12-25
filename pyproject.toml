@@ -1,0 +1,44 @@
+#!pyproject.toml
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vozdipovo-app"
+version = "0.6.0"
+description = "vozdipovo scraping and writing pipeline"
+requires-python = ">=3.12"
+dependencies = [
+  "requests>=2.31",
+  "beautifulsoup4>=4.12",
+  "lxml>=5.2",
+  "python-dotenv>=1.0",
+  "PyYAML>=6.0",
+  "rich>=13.7",
+  "feedparser>=6.0",
+  "readability-lxml>=0.8",
+  "tenacity>=8.2",
+  "pydub>=0.25",
+  "pydantic>=2.6,<3",
+  "pydantic-settings>=2,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+vozdipovo-run-once = "vozdipovo_app.cli:main"
+vozdipovo-run-stage = "vozdipovo_app.cli:main"
+vozdipovo-pipeline-doctor = "vozdipovo_app.tools.pipeline_doctor:main"
+apertus = "vozdipovo_app.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["vozdipovo_app*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

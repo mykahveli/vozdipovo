@@ -1,0 +1,126 @@
+{
+  "_comment": "config central, schema estrito, pools de modelos, ids de categorias, tuning de throughput",
+  "version": 1,
+  "pipeline": {
+    "rss_max_age_hours": 72,
+    "rss_drop_if_no_pub_date": true,
+    "scrape_limit_per_run": 500,
+    "judge_limit_per_run": 200,
+    "generate_limit_per_run": 30,
+    "revision_limit_per_run": 30,
+    "publish_limit_per_run": 30,
+    "throttle_seconds": {
+      "judge": 0.2,
+      "wordpress": 0.6
+    }
+  },
+  "scoring": {
+    "significance_threshold": 1.2,
+    "significance_power": 1.7,
+    "editorial_power": 2.0
+  },
+  "llm": {
+    "judge": {
+      "groq": {
+        "env_override": "JUDGE_GROQ_MODELS",
+        "models": [
+          "llama\u002d3.3\u002d70b\u002dversatile",
+          "qwen/qwen3\u002d32b",
+          "moonshotai/kimi\u002dk2\u002dinstruct\u002d0905",
+          "meta\u002dllama/llama\u002d4\u002dmaverick\u002d17b\u002d128e\u002dinstruct",
+          "meta\u002dllama/llama\u002d4\u002dscout\u002d17b\u002d16e\u002dinstruct"
+        ]
+      },
+      "openrouter": {
+        "env_override": "JUDGE_OPENROUTER_MODELS",
+        "models": [
+          "meta\u002dllama/llama\u002d3.1\u002d405b\u002dinstruct:free",
+          "nousresearch/hermes\u002d3\u002dllama\u002d3.1\u002d405b:free",
+          "openai/gpt\u002doss\u002d120b:free",
+          "meta\u002dllama/llama\u002d3.3\u002d70b\u002dinstruct:free"
+        ]
+      }
+    },
+    "reviser": {
+      "groq": {
+        "env_override": "REVISER_GROQ_MODELS",
+        "models": [
+          "qwen/qwen3\u002d32b",
+          "moonshotai/kimi\u002dk2\u002dinstruct\u002d0905",
+          "meta\u002dllama/llama\u002d4\u002dmaverick\u002d17b\u002d128e\u002dinstruct",
+          "meta\u002dllama/llama\u002d4\u002dscout\u002d17b\u002d16e\u002dinstruct"
+        ]
+      },
+      "openrouter": {
+        "env_override": "REVISER_OPENROUTER_MODELS",
+        "models": [
+          "meta\u002dllama/llama\u002d3.1\u002d405b\u002dinstruct:free",
+          "nousresearch/hermes\u002d3\u002dllama\u002d3.1\u002d405b:free",
+          "openai/gpt\u002doss\u002d120b:free",
+          "meta\u002dllama/llama\u002d3.3\u002d70b\u002dinstruct:free"
+        ]
+      }
+    }
+  },
+  "homepage": {
+    "time_window_hours": 24,
+    "breaking": {
+      "category_id": 14,
+      "limit": 6,
+      "editorial_threshold": 3.0
+    },
+    "featured": {
+      "category_id": 15,
+      "limit": 10,
+      "editorial_threshold": 2.2
+    }
+  },
+  "wordpress": {
+    "default_status": "publish",
+    "category_ids": {
+      "Ambiente": 1905,
+      "Breaking News": 14,
+      "Casos do Dia": 2083,
+      "Ciência": 9,
+      "Cultura": 11,
+      "Desporto": 12,
+      "Economia": 13,
+      "Featured Stories": 15,
+      "Geral": 1,
+      "Outras": 1,
+      "Internacional": 3,
+      "Justiça": 16,
+      "Legislação": 265,
+      "Lifestyle": 1706,
+      "Política": 17,
+      "Saúde": 19,
+      "Sociedade": 20,
+      "Tecnologia": 21
+    },
+    "allowed_editorial_categories": [
+      "Internacional",
+      "Ciência",
+      "Cultura",
+      "Desporto",
+      "Economia",
+      "Legislação",
+      "Justiça",
+      "Política",
+      "Saúde",
+      "Sociedade",
+      "Tecnologia",
+      "Casos do Dia",
+      "Lifestyle",
+      "Geral"
+    ]
+  },
+  "audio": {
+    "enabled": true,
+    "only_for_highlights": true,
+    "highlights": ["BREAKING", "FEATURED"],
+    "output_subdir": "audio"
+  },
+  "judge": {
+    "suspend_mode": "skip"
+  }
+}

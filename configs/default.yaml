@@ -1,0 +1,36 @@
+#!filepath: configs/default.yaml
+rag:
+  embed_model: "sentence-transformers/all-MiniLM-L6-v2"
+  chunk_size: 1200
+  chunk_overlap: 200
+  top_k: 24
+
+paths:
+  db: "configs/vozdipovo.db"
+  textos: "data/textos"
+  prompt: "configs/prompts/reporter.md"
+  prompt_revisao: "configs/prompts/editor.md"
+  out_markdown: "data/out_markdown"
+  sites: "configs/sites.yaml"
+
+api:
+  base_url: "https://publicai.pt/api"
+  api_version: "v1"
+  version: "v1"
+  model: "gpt-4o-mini"
+  temperature: 0.25
+  top_p: 0.85
+  max_tokens: 1536
+  frequency_penalty: 0.0
+  presence_penalty: 0.0
+  user_agent: "VozDiPovo/1.0 (+https://vozdipovo.cv)"
+
+wordpress:
+  base_url: "https://vozdipovo.cv"
+  username: "admin"
+  app_password: ""
+  default_status: "publish"
+  timeout: 30
+  rate_sleep: 1.0
+
+structured_json: true
