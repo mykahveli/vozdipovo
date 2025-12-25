@@ -1,0 +1,70 @@
+# .gitignore
+.ruff_cache/
+.DS_Store
+._*
+*.pyc
+configs/vozdipovo.db-shm
+configs/vozdipovo.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ambiente virtual
+venv/
+env/
+ENV/
+.env
+.venv
+
+# Banco de dados
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+
+# Configurações sensíveis
+*.key
+*.pem
+*.crt
+configs/*.db*
+configs/*.yaml
+configs/*.json
+!configs/default.yaml
+!configs/editorial.json
+
+# Dados e logs
+data/
+!data/exports/
+!data/logs/app.log
+!data/logs/app.jsonl
+
+# Builds e distribuição
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
