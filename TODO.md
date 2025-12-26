@@ -2,6 +2,11 @@
 
 Esta lista de tarefas (To Do) foi gerada com base na análise da arquitetura e do fluxo de trabalho do pipeline de notícias automatizado VozDiPovo.
 
+---
+- Introduzir uma etapa de validação de múltiplas fontes na fase de avaliação para cruzar referências de factos e minimizar alucinações do LLM.
+
+- Implemente uma camada de observabilidade usando ferramentas como Prometheus ou um painel Streamlit para rastrear o uso de tokens, o custo por artigo e o rendimento do pipeline.
+
 ## 1. Melhorias na Arquitetura e Código
 
 | Prioridade | Módulo | Tarefa | Descrição |

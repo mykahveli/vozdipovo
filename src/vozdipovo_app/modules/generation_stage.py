@@ -1,23 +1,22 @@
 #!src/vozdipovo_app/modules/generation_stage.py
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
-from vozdipovo_app.categories import CategoryContext, resolve_categoria_tematica
 from vozdipovo_app.config_editorial import get_editorial_config
 from vozdipovo_app.news_pipeline import generate_one
-from vozdipovo_app.revision import revise_article
 from vozdipovo_app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+
 _STOPWORDS = {
     "para",
     "pelo",
-    "pela",
     "pela",
     "como",
     "quando",
@@ -31,7 +30,8 @@ _STOPWORDS = {
 def _candidates(
     conn: sqlite3.Connection, significance_threshold: float, limit: int
 ) -> Sequence[sqlite3.Row]:
-    if float(significance_threshold or 0.0) > 0.0:
+    threshold = float(significance_threshold or 0.0)
+    if threshold > 0.0:
         return conn.execute(
             """
             SELECT
@@ -50,9 +50,9 @@ def _candidates(
               )
               AND (a.corpo_md IS NULL OR a.corpo_md = '')
             ORDER BY a.score_editorial DESC, a.final_score DESC
-            LIMIT ?
-            """,
-            (float(significance_threshold), int(limit)),
+            LIMIT ?;
+            """.strip(),
+            (threshold, int(limit)),
         ).fetchall()
 
     return conn.execute(
@@ -72,18 +72,19 @@ def _candidates(
           )
           AND (a.corpo_md IS NULL OR a.corpo_md = '')
         ORDER BY a.score_editorial DESC, a.final_score DESC
-        LIMIT ?
-        """,
+        LIMIT ?;
+        """.strip(),
         (int(limit),),
     ).fetchall()
 
 
-def _coerce_keywords(v: Any) -> str:
+def _coerce_list_str(v: Any) -> list[str]:
     if v is None:
-        return ""
+        return []
     if isinstance(v, list):
-        return ", ".join(str(x).strip() for x in v if str(x).strip())
-    return str(v).strip()
+        return [str(x).strip() for x in v if str(x).strip()]
+    s = str(v).strip()
+    return [s] if s else []
 
 
 def _coerce_text(v: Any) -> str:
@@ -110,8 +111,8 @@ def _overlap_stats(source: str, generated: str) -> tuple[int, float]:
 
 def _source_text(conn: sqlite3.Connection, legal_doc_id: int) -> str:
     row = conn.execute(
-        "SELECT title, summary, content_text FROM legal_docs WHERE id=?",
-        (legal_doc_id,),
+        "SELECT title, summary, content_text, url, pub_date, published_at FROM legal_docs WHERE id=?",
+        (int(legal_doc_id),),
     ).fetchone()
     if not row:
         return ""
@@ -120,13 +121,19 @@ def _source_text(conn: sqlite3.Connection, legal_doc_id: int) -> str:
         str(row["summary"] or ""),
         str(row["content_text"] or ""),
     ]
-    joined = "\n\n".join([p.strip() for p in parts if str(p).strip()])
-    return joined.strip()
+    merged = "\n\n".join([p.strip() for p in parts if str(p).strip()]).strip()
+    url = str(row["url"] or "").strip()
+    pub_date = str(row["pub_date"] or row["published_at"] or "").strip()
+    if url:
+        merged = f"{merged}\n\nURL: {url}".strip()
+    if pub_date:
+        merged = f"{merged}\n\nDATA: {pub_date}".strip()
+    return merged
 
 
 @dataclass(frozen=True, slots=True)
 class GenerationStage:
-    """Gera drafts e aplica revisão, persistindo em news_articles."""
+    """Gera drafts (Writer) e persiste em news_articles."""
 
     ctx: Any
     significance_threshold: float
@@ -144,7 +151,9 @@ class GenerationStage:
         conn = self.ctx.conn
         cfg = self.ctx.app_cfg
 
-        prompt_path = str(cfg["paths"].get("prompt", "configs/prompts/reporter.md"))
+        prompt_path = str(
+            cfg.get("paths", {}).get("prompt", "configs/prompts/reporter.md")
+        )
         rows = _candidates(conn, self.significance_threshold, self.limit)
         if not rows:
             logger.info("Nenhum artigo elegível para redação.")
@@ -157,6 +166,7 @@ class GenerationStage:
             legal_doc_id = int(r["legal_doc_id"])
             site_name = str(r["site_name"] or "").strip()
             act_type = str(r["act_type"] or "").strip()
+
             try:
                 source = _source_text(conn, legal_doc_id)
                 if len(source) < min_source_chars:
@@ -169,46 +179,27 @@ class GenerationStage:
                     legal_doc_id,
                     prompt_path,
                     conn=conn,
+                    rotator=getattr(self.ctx, "rotator", None),
                 )
+
                 draft_title = _coerce_text(draft.get("titulo"))
                 draft_body = _coerce_text(
                     draft.get("texto_completo_md") or draft.get("corpo_md")
                 )
-                draft_keywords = _coerce_keywords(draft.get("keywords"))
-                draft_categoria = _coerce_text(draft.get("categoria_tematica"))
-                draft_subcategoria = _coerce_text(draft.get("subcategoria"))
+                factos = _coerce_list_str(draft.get("factos_nucleares"))
+                fontes = _coerce_list_str(draft.get("fontes_mencionadas"))
+                keywords_list = _coerce_list_str(draft.get("keywords"))
+                categoria = _coerce_text(draft.get("categoria_tematica"))
+                subcategoria = _coerce_text(draft.get("subcategoria"))
 
                 if not draft_title or not draft_body:
-                    raise RuntimeError("Draft incompleto.")
+                    raise RuntimeError("Draft incompleto (titulo/corpo).")
 
-                rev = revise_article(
-                    title=draft_title,
-                    raw_article=draft_body,
-                    keywords=draft_keywords,
-                    site_name=site_name,
-                    act_type=act_type,
-                    allow_unrevised_fallback=True,
-                )
-
-                categoria = resolve_categoria_tematica(
-                    CategoryContext(site_name=site_name, act_type=act_type),
-                    model_category=(rev.categoria_tematica or "").strip(),
-                    draft_category=draft_categoria,
-                    fallback="Geral",
-                )
-                subcategoria = (rev.subcategoria or "").strip() or draft_subcategoria
-                titulo_final = (rev.title or "").strip() or draft_title
-                corpo_final = (rev.text or "").strip() or draft_body
-                keywords_final = (rev.keywords or "").strip() or draft_keywords
-
-                common, ratio = _overlap_stats(source, f"{titulo_final}\n{corpo_final}")
+                common, ratio = _overlap_stats(source, f"{draft_title}\n{draft_body}")
                 if common < min_overlap_tokens or ratio < min_overlap_ratio:
                     raise RuntimeError(
                         f"Baixa fidelidade, common={common}, ratio={ratio:.4f}"
                     )
-
-                status = "SUCCESS" if rev.revision_status == "revised" else "FAILED"
-                review_error = (rev.revision_error or "").strip()[:900]
 
                 conn.execute(
                     """
@@ -216,30 +207,36 @@ class GenerationStage:
                     SET titulo=?,
                         corpo_md=?,
                         keywords=?,
+                        keywords_json=?,
                         categoria_tematica=?,
                         subcategoria=?,
-                        editor_comments=?,
+                        reporter_payload_json=?,
+                        reporter_factos_json=?,
+                        reporter_fontes_json=?,
                         reviewed_by_model=?,
-                        review_error=?,
-                        review_status=?,
-                        reviewed_at=datetime('now')
-                    WHERE legal_doc_id=?
-                    """,
+                        review_error='',
+                        review_status='GENERATED',
+                        reviewed_at=datetime('now'),
+                        updated_at=datetime('now')
+                    WHERE legal_doc_id=?;
+                    """.strip(),
                     (
-                        titulo_final,
-                        corpo_final,
-                        keywords_final,
-                        categoria,
-                        subcategoria,
-                        (rev.comentarios_edicao or "")[:900],
-                        (rev.revision_model_used or "")[:200],
-                        review_error,
-                        status,
+                        draft_title[:220],
+                        draft_body,
+                        ", ".join(keywords_list)[:800],
+                        json.dumps(keywords_list, ensure_ascii=False)[:2000],
+                        categoria[:60],
+                        subcategoria[:80],
+                        str(draft.get("reporter_payload_json") or "")[:2000],
+                        json.dumps(factos, ensure_ascii=False)[:2000],
+                        json.dumps(fontes, ensure_ascii=False)[:2000],
+                        str(draft.get("reviewed_by_model") or "")[:200],
                         legal_doc_id,
                     ),
                 )
                 conn.commit()
                 done += 1
+
             except Exception as e:
                 conn.rollback()
                 conn.execute(
@@ -247,9 +244,10 @@ class GenerationStage:
                     UPDATE news_articles
                     SET review_status='FAILED',
                         review_error=?,
-                        reviewed_at=datetime('now')
-                    WHERE legal_doc_id=?
-                    """,
+                        reviewed_at=datetime('now'),
+                        updated_at=datetime('now')
+                    WHERE legal_doc_id=?;
+                    """.strip(),
                     (str(e)[:900], legal_doc_id),
                 )
                 conn.commit()
@@ -261,11 +259,12 @@ class GenerationStage:
 if __name__ == "__main__":
     import sqlite3
 
+    from vozdipovo_app.db.migrate import ensure_schema
     from vozdipovo_app.modules.base import StageContext
     from vozdipovo_app.settings import get_settings
 
     settings = get_settings()
-    conn = sqlite3.connect(str(settings.db_path))
+    conn = ensure_schema(str(settings.db_path))
     conn.row_factory = sqlite3.Row
     try:
         stage = GenerationStage(
@@ -275,8 +274,6 @@ if __name__ == "__main__":
             significance_threshold=0.0,
             limit=5,
         )
-        processed = stage.run()
-        conn.commit()
-        print(processed)
+        print(stage.run())
     finally:
         conn.close()

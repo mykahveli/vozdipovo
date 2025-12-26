@@ -1,13 +1,12 @@
-#!filepath: src/vozdipovo_app/modules/revision_stage.py
+#!src/vozdipovo_app/modules/revision_stage.py
 from __future__ import annotations
 
 import json
 import sqlite3
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import Any, List, Sequence
 
-from vozdipovo_app.article_reviser import revise_article
-from vozdipovo_app.modules.base import Stage, StageContext
+from vozdipovo_app.revision import revise_article
 from vozdipovo_app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -38,30 +37,32 @@ def _loads_list(s: str) -> List[str]:
 
 
 @dataclass(frozen=True, slots=True)
-class RevisionStage(Stage):
-    """Editor stage, revises and validates the draft."""
+class RevisionStage:
+    """Editor stage: revisa e valida o draft."""
 
-    ctx: StageContext
+    ctx: Any
     limit: int
 
     def run(self) -> int:
         conn = self.ctx.conn
         conn.row_factory = sqlite3.Row
+
         rows = _candidates(conn, limit=int(self.limit))
         if not rows:
+            logger.info("Nenhum draft para revisão.")
             return 0
 
         updated = 0
         for r in rows:
             legal_doc_id = int(r["legal_doc_id"])
-            title = str(r["titulo"] or "")
-            body_md = str(r["corpo_md"] or "")
-            keywords = str(r["keywords"] or "")
-            categoria = str(r["categoria_tematica"] or "")
-            subcategoria = str(r["subcategoria"] or "")
-            site_name = str(r["site_name"] or "")
-            act_type = str(r["act_type"] or "")
-            factos = _loads_list(str(r["reporter_facts_json"] or "[]"))
+            title = str(r.get("titulo") or "").strip()
+            body_md = str(r.get("corpo_md") or "").strip()
+            keywords = str(r.get("keywords") or "").strip()
+            categoria = str(r.get("categoria_tematica") or "").strip()
+            subcategoria = str(r.get("subcategoria") or "").strip()
+            site_name = str(r.get("site_name") or "").strip()
+            act_type = str(r.get("act_type") or "").strip()
+            factos = _loads_list(str(r.get("reporter_factos_json") or "[]"))
 
             try:
                 rev = revise_article(
@@ -81,10 +82,16 @@ class RevisionStage(Stage):
                         UPDATE news_articles
                         SET review_status='ERROR',
                             review_error=?,
-                            reviewed_at=datetime('now')
+                            reviewed_by_model=?,
+                            reviewed_at=datetime('now'),
+                            updated_at=datetime('now')
                         WHERE legal_doc_id=?;
                         """.strip(),
-                        (str(rev.revision_error or "")[:900], legal_doc_id),
+                        (
+                            str(rev.revision_error or "")[:900],
+                            rev.revision_model_used[:200],
+                            legal_doc_id,
+                        ),
                     )
                     conn.commit()
                     continue
@@ -102,15 +109,16 @@ class RevisionStage(Stage):
                         reviewed_by_model=?,
                         review_error='',
                         review_status='REVIEWED',
-                        reviewed_at=datetime('now')
+                        reviewed_at=datetime('now'),
+                        updated_at=datetime('now')
                     WHERE legal_doc_id=?;
                     """.strip(),
                     (
                         str(rev.titulo_revisto or "")[:220],
                         str(rev.texto_completo_md_revisto or ""),
-                        ", ".join([k for k in rev.keywords_revistas if str(k).strip()])[
-                            :800
-                        ],
+                        ", ".join(
+                            [k for k in (rev.keywords_revistas or []) if str(k).strip()]
+                        )[:800],
                         str(rev.categoria_tematica or "")[:60],
                         str(rev.subcategoria or "")[:80],
                         str(rev.comentarios_edicao or "")[:900],
@@ -126,3 +134,21 @@ class RevisionStage(Stage):
                 logger.error(f"❌ Editor falhou, legal_doc_id={legal_doc_id}, erro={e}")
 
         return updated
+
+
+if __name__ == "__main__":
+    from vozdipovo_app.db.migrate import ensure_schema
+    from vozdipovo_app.modules.base import StageContext
+    from vozdipovo_app.settings import get_settings
+
+    s = get_settings()
+    conn = ensure_schema(str(s.db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        stage = RevisionStage(
+            ctx=StageContext(conn=conn, app_cfg=s.app_cfg, editorial=s.editorial),
+            limit=10,
+        )
+        print(stage.run())
+    finally:
+        conn.close()

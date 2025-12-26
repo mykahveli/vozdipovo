@@ -1,7 +1,7 @@
-#!filepath: src/vozdipovo_app/llm/models.py
+#!src/vozdipovo_app/llm/models.py
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -15,7 +15,12 @@ class LLMProvider(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class ChatMessage:
-    """A single chat message."""
+    """A single chat message.
+
+    Attributes:
+        role: Message role, for example user, system, assistant.
+        content: Message content.
+    """
 
     role: str
     content: str
@@ -25,18 +30,18 @@ class ChatMessage:
 class ChatRequest:
     """A provider agnostic chat request.
 
-    Args:
+    Attributes:
         model: Provider model id.
         messages: Chat messages.
         temperature: Sampling temperature.
-        max_tokens: Output token cap.
-        top_p: Nucleus sampling.
-        response_format: Optional structured output hint.
-        extra: Optional provider specific options.
+        max_tokens: Max tokens for completion.
+        top_p: Nucleus sampling parameter.
+        response_format: Provider specific response format options.
+        extra: Provider specific options.
     """
 
     model: Optional[str] = None
-    messages: List[ChatMessage] = None  # type: ignore[assignment]
+    messages: List[ChatMessage] = field(default_factory=list)
     temperature: float = 0.0
     max_tokens: Optional[int] = None
     top_p: Optional[float] = None
@@ -46,9 +51,28 @@ class ChatRequest:
 
 @dataclass(frozen=True, slots=True)
 class ChatResponse:
-    """A provider agnostic chat response."""
+    """A provider agnostic chat response.
+
+    Attributes:
+        content: Text content.
+        provider: Provider name.
+        model: Model id.
+        raw: Optional raw provider response.
+    """
 
     content: str
     provider: str
     model: str
     raw: Optional[Dict[str, Any]] = None
+
+
+Message = ChatMessage
+
+
+__all__ = [
+    "ChatMessage",
+    "ChatRequest",
+    "ChatResponse",
+    "LLMProvider",
+    "Message",
+]

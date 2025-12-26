@@ -1,59 +1,209 @@
-#!filepath: src/vozdipovo_app/llm/openrouter_client.py
+#!src/vozdipovo_app/llm/openrouter_client.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict
+import json
+from typing import Any
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from vozdipovo_app.llm.http_transport import HTTPTransport
-from vozdipovo_app.llm.models import ChatRequest, ChatResponse
-from vozdipovo_app.llm.settings import OpenRouterSettings
+from vozdipovo_app.llm.models import ChatMessage, ChatRequest, ChatResponse
 
 
-@dataclass(frozen=True, slots=True)
+class OpenRouterSettings(BaseSettings):
+    """Configuração do cliente OpenRouter.
+
+    Attributes:
+        openrouter_api_key: Chave da API do OpenRouter.
+        timeout_seconds: Timeout total por pedido, em segundos.
+        base_url: URL base da API.
+        referer: Referer opcional para ranking no OpenRouter.
+        title: Title opcional para ranking no OpenRouter.
+    """
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    openrouter_api_key: str
+    timeout_seconds: int = 60
+    base_url: str = "https://openrouter.ai/api/v1"
+    referer: str | None = None
+    title: str | None = None
+
+
+class OpenRouterConfig(OpenRouterSettings):
+    """Compat layer para código antigo.
+
+    O código legado espera um tipo OpenRouterConfig com from_env.
+    """
+
+    @classmethod
+    def from_env(cls) -> "OpenRouterConfig":
+        """Carrega configuração a partir do ambiente e env file.
+
+        Returns:
+            OpenRouterConfig: Instância configurada.
+        """
+        return cls()
+
+
 class OpenRouterClient:
-    """OpenRouter chat client."""
+    """Cliente OpenRouter compatível com rotas tipo OpenAI chat completions."""
 
-    settings: OpenRouterSettings
+    def __init__(self, settings: OpenRouterSettings) -> None:
+        """Inicializa o cliente.
+
+        Args:
+            settings: Configuração do cliente.
+        """
+        self._settings = settings
+
+    @property
+    def settings(self) -> OpenRouterSettings:
+        """Retorna a configuração atual.
+
+        Returns:
+            OpenRouterSettings: Configuração.
+        """
+        return self._settings
 
     def chat(self, req: ChatRequest) -> ChatResponse:
-        model = str(req.model or "").strip()
-        if not model:
-            raise ValueError("model em falta no ChatRequest")
+        """Executa uma chamada de chat.
 
-        h = chr(45)
+        Args:
+            req: Pedido estruturado.
+
+        Returns:
+            ChatResponse: Resposta do modelo.
+        """
+        return self._chat_with_timeout(
+            req=req, timeout_seconds=int(self.settings.timeout_seconds)
+        )
+
+    def chat_completions(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
+        response_format_json: bool = False,
+    ) -> str:
+        """Compat layer para chamadas no estilo router legado.
+
+        Args:
+            model: Nome do modelo.
+            messages: Lista de mensagens no formato dict.
+            temperature: Temperatura.
+            max_tokens: Máximo de tokens.
+            response_format_json: Se True, pede output JSON.
+
+        Returns:
+            str: Conteúdo textual da resposta.
+        """
+        chat_messages = [
+            ChatMessage(role=m["role"], content=m["content"]) for m in messages
+        ]
+        response_format = {"type": "json_object"} if response_format_json else None
+        req = ChatRequest(
+            model=model,
+            messages=chat_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+        return self._chat_with_timeout(
+            req=req, timeout_seconds=int(self.settings.timeout_seconds)
+        ).text
+
+    def _chat_with_timeout(
+        self, *, req: ChatRequest, timeout_seconds: int
+    ) -> ChatResponse:
+        """Executa a chamada usando um timeout específico.
+
+        Args:
+            req: Pedido estruturado.
+            timeout_seconds: Timeout total.
+
+        Returns:
+            ChatResponse: Resposta do modelo.
+        """
+        transport = HTTPTransport(timeout_seconds=timeout_seconds)
+
         headers = {
-            "Authorization": f"Bearer {self.settings.api_key}",
-            f"Content{h}Type": "application/json",
+            "Authorization": f"Bearer {self.settings.openrouter_api_key}",
+            f"Content{chr(45)}Type": "application/json",
         }
-        if self.settings.http_referer.strip():
-            headers[f"HTTP{h}Referer"] = self.settings.http_referer.strip()
-        if self.settings.app_title.strip():
-            headers[f"X{h}Title"] = self.settings.app_title.strip()
 
-        payload: Dict[str, Any] = {
-            "model": model,
+        if self.settings.referer:
+            headers[f"HTTP{chr(45)}Referer"] = self.settings.referer
+        if self.settings.title:
+            headers[f"X{chr(45)}Title"] = self.settings.title
+
+        payload: dict[str, Any] = {
+            "model": req.model,
             "messages": [{"role": m.role, "content": m.content} for m in req.messages],
-            "temperature": float(req.temperature),
+            "temperature": req.temperature,
         }
         if req.max_tokens is not None:
             payload["max_tokens"] = int(req.max_tokens)
-        if req.top_p is not None:
-            payload["top_p"] = float(req.top_p)
         if req.response_format is not None:
             payload["response_format"] = dict(req.response_format)
-        if req.extra:
-            payload.update(dict(req.extra))
 
-        t = HTTPTransport(timeout_seconds=int(self.settings.timeout_seconds))
-        data = t.post_json(
+        resp = transport.post_json(
             url=f"{self.settings.base_url}/chat/completions",
             headers=headers,
             payload=payload,
             provider="openrouter",
-            model=model,
+            model=str(req.model or ""),
         )
 
-        content = str(
-            ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-        ).strip()
-        return ChatResponse(content=content, provider="openrouter", model=model, raw=data)
+        content = ""
+        try:
+            choice0 = (resp.get("choices") or [{}])[0]
+            msg = choice0.get("message") or {}
+            content = str(msg.get("content") or "").strip()
+        except Exception:
+            content = ""
+
+        return ChatResponse(raw=resp, text=content)
+
+    @staticmethod
+    def extract_json_object(text: str) -> dict[str, Any]:
+        """Extrai um objeto JSON do texto.
+
+        Args:
+            text: Texto possivelmente contendo JSON.
+
+        Returns:
+            dict[str, Any]: Objeto JSON.
+
+        Raises:
+            ValueError: Se não for possível extrair JSON válido.
+        """
+        s = (text or "").strip()
+        if not s:
+            raise ValueError("Resposta vazia")
+
+        start = s.find("{")
+        end = s.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("JSON não encontrado")
+
+        chunk = s[start : end + 1]
+        obj = json.loads(chunk)
+        if not isinstance(obj, dict):
+            raise ValueError("JSON não é objeto")
+        return obj
+
+
+if __name__ == "__main__":
+    cfg = OpenRouterConfig.from_env()
+    client = OpenRouterClient(cfg)
+    out = client.chat_completions(
+        model="meta-llama/llama-3.1-8b-instruct:free",
+        messages=[
+            {"role": "user", "content": "Devolve um JSON com chave ok e valor true"}
+        ],
+        response_format_json=True,
+    )
+    print(out)

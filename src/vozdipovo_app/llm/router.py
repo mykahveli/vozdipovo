@@ -1,7 +1,9 @@
-#!filepath: src/vozdipovo_app/llm/router.py
+#!src/vozdipovo_app/llm/router.py
 from __future__ import annotations
 
+import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,6 +42,44 @@ class LLMRouter:
 
         self._groq: Optional[GroqClient] = None
         self._openrouter: Optional[OpenRouterClient] = None
+
+    @staticmethod
+    def from_stage_models(models: List[str]) -> "LLMRouter":
+        """Cria um router a partir de uma lista de modelos.
+
+        Heurística:
+        - Prefixos explícitos: "groq:..." ou "openrouter:..."
+        - Sem prefixo: se contiver "/" assume openrouter; caso contrário groq.
+
+        Args:
+            models: Lista de strings de modelos.
+
+        Returns:
+            LLMRouter: Router configurado.
+        """
+        specs: List[ModelSpec] = []
+        for raw in models:
+            s = str(raw or "").strip()
+            if not s:
+                continue
+            provider: LLMProvider
+            model = s
+            if s.startswith("groq:"):
+                provider = LLMProvider.GROQ
+                model = s.split(":", 1)[1].strip()
+            elif s.startswith("openrouter:"):
+                provider = LLMProvider.OPENROUTER
+                model = s.split(":", 1)[1].strip()
+            elif "/" in s:
+                provider = LLMProvider.OPENROUTER
+            else:
+                provider = LLMProvider.GROQ
+            if model:
+                specs.append(ModelSpec(provider=provider, model=model))
+
+        if not specs:
+            specs = LLMRouter.default_models_for_editorial()
+        return LLMRouter(models=specs)
 
     @staticmethod
     def default_models_for_editorial() -> List[ModelSpec]:
@@ -183,3 +223,103 @@ class LLMRouter:
         raise LLMError(
             f"Todos os modelos falharam ({purpose}). Último erro: {last_err}"
         )
+
+    def run_json(
+        self,
+        *,
+        corr_id: str,
+        prompt: str,
+        force_models: List[str] | None = None,
+        temperature: float = 0.2,
+        max_tokens: Optional[int] = None,
+        purpose: str = "stage",
+    ) -> "JsonRunResult":
+        """Executa um prompt que deve devolver JSON.
+
+        Args:
+            corr_id: Correlation id (para logs).
+            prompt: Prompt final para o LLM.
+            force_models: Override de modelos (strings).
+            temperature: Sampling.
+            max_tokens: Limite tokens.
+            purpose: Tag para logging.
+
+        Returns:
+            JsonRunResult: Resultado estruturado.
+        """
+        _ = corr_id
+
+        router = self
+        if force_models:
+            router = LLMRouter.from_stage_models(force_models)
+
+        try:
+            content, model_key = router.chat_json(
+                messages=[{"role": "user", "content": str(prompt or "")}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                purpose=purpose,
+            )
+        except Exception as e:
+            return JsonRunResult(
+                ok=False,
+                provider="",
+                model="",
+                text="",
+                parsed_json=None,
+                error=str(e),
+            )
+
+        parsed = _extract_json_object(content)
+        provider, model = (model_key.split(":", 1) + [""])[:2]
+
+        if parsed is None:
+            return JsonRunResult(
+                ok=False,
+                provider=provider,
+                model=model,
+                text=str(content or ""),
+                parsed_json=None,
+                error="JSON inválido na resposta",
+            )
+
+        return JsonRunResult(
+            ok=True,
+            provider=provider,
+            model=model,
+            text=str(content or ""),
+            parsed_json=parsed,
+            error="",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class JsonRunResult:
+    """Resultado de uma execução que pretende JSON."""
+
+    ok: bool
+    provider: str
+    model: str
+    text: str
+    parsed_json: Dict[str, Any] | None
+    error: str
+
+
+def _extract_json_object(text: str) -> Dict[str, Any] | None:
+    s = str(text or "").strip()
+    if not s:
+        return None
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+
+    m = re.search(r"\{[\s\S]*\}", s)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None

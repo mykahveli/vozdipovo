@@ -2,40 +2,10 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
 from typing import Any, Optional
 
 from vozdipovo_app.llm.rotator import LLMRotator
 from vozdipovo_app.llm.stage_client import get_stage_client_reporter
-from vozdipovo_app.utils.logger import get_logger
-
-logger = get_logger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class ReporterDraft:
-    titulo: str
-    texto_completo_md: str
-    factos_nucleares: list[str]
-    fontes_mencionadas: list[str]
-    keywords: list[str]
-    categoria_tematica: str
-    subcategoria: str
-    reporter_payload_json: str
-    reviewed_by_model: str
-
-
-def _coerce_list_str(v: Any) -> list[str]:
-    if v is None:
-        return []
-    if isinstance(v, list):
-        return [str(x).strip() for x in v if str(x).strip()]
-    s = str(v).strip()
-    return [s] if s else []
-
-
-def _coerce_str(v: Any) -> str:
-    return str(v or "").strip()
 
 
 def _allowed_keys() -> list[str]:
@@ -48,6 +18,10 @@ def _allowed_keys() -> list[str]:
         "categoria_tematica",
         "subcategoria",
     ]
+
+
+def _coerce_str(v: Any) -> str:
+    return str(v or "").strip()
 
 
 def _load_source(conn: sqlite3.Connection, legal_doc_id: int) -> dict[str, str]:
@@ -99,6 +73,8 @@ def generate_one(
     conn: sqlite3.Connection,
     rotator: Optional[LLMRotator] = None,
 ) -> dict[str, Any]:
+    """Gera 1 draft via reporter prompt."""
+    _ = app_cfg
     _ = rotator
 
     src = _load_source(conn, legal_doc_id)
@@ -106,32 +82,30 @@ def generate_one(
         raise RuntimeError(f"Fonte não encontrada, legal_doc_id={legal_doc_id}")
 
     reporter = get_stage_client_reporter()
-    title = src.get("title", "")
-    corpo = src.get("corpo", "")
-    site_name = src.get("site_name", "")
-    act_type = src.get("act_type", "")
-
     res = reporter.run_json(
-        prompt_path=prompt_path,
+        corr_id=f"reporter:{legal_doc_id}",
         template_vars={
-            "TITULO": title,
-            "CORPO": corpo,
+            "TITULO": src.get("title", ""),
+            "CORPO": src.get("corpo", ""),
             "KEYWORDS": "",
-            "SITE_NAME": site_name,
-            "ACT_TYPE": act_type,
+            "SITE_NAME": src.get("site_name", ""),
+            "ACT_TYPE": src.get("act_type", ""),
         },
         allowed_keys=_allowed_keys(),
+        prompt_path_override=str(prompt_path or "").strip() or None,
+        force_models=None,
     )
 
-    payload = res.data if isinstance(res.data, dict) else {}
-    payload["reviewed_by_model"] = f"{res.provider_used}:{res.model_used}".strip(":")
-    payload["reporter_payload_json"] = res.raw_text or ""
+    if not res.ok or not isinstance(res.parsed_json, dict):
+        raise RuntimeError(str(res.error or "Falha no reporter"))
+
+    payload: dict[str, Any] = dict(res.parsed_json or {})
+    payload["reviewed_by_model"] = f"{res.provider}:{res.model}".strip(":")
+    payload["reporter_payload_json"] = str(res.raw_text or "").strip()
     return payload
 
 
 if __name__ == "__main__":
-    import sqlite3
-
     from vozdipovo_app.settings import get_settings
 
     settings = get_settings()
@@ -148,6 +122,6 @@ if __name__ == "__main__":
             ),
             conn=conn,
         )
-        print(out.keys())
+        print(sorted(out.keys()))
     finally:
         conn.close()

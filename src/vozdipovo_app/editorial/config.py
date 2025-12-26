@@ -1,4 +1,4 @@
-#!filepath: src/vozdipovo_app/editorial/config.py
+#!src/vozdipovo_app/editorial/config.py
 from __future__ import annotations
 
 import json
@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from vozdipovo_app.editorial.models import EditorialConfig, ModelPool
 from vozdipovo_app.utils.logger import get_logger
+from vozdipovo_app.utils.project_paths import ProjectPaths
 
 logger = get_logger(__name__)
 
@@ -26,7 +27,11 @@ class EditorialConfigError(RuntimeError):
 
 def _strip_private_keys(obj: Any) -> Any:
     if isinstance(obj, dict):
-        return {k: _strip_private_keys(v) for k, v in obj.items() if not str(k).startswith("__")}
+        return {
+            k: _strip_private_keys(v)
+            for k, v in obj.items()
+            if not str(k).startswith("__")
+        }
     if isinstance(obj, list):
         return [_strip_private_keys(x) for x in obj]
     return obj
@@ -90,7 +95,7 @@ def load_editorial_config_from_path(path: Path) -> EditorialConfig:
     data = _strip_private_keys(data)
 
     try:
-        cfg = EditorialConfig.parse_obj(data)
+        cfg = EditorialConfig.model_validate(data)
     except ValidationError as e:
         raise EditorialConfigError(f"Editorial config inválido: {e}") from e
 
@@ -107,9 +112,16 @@ class EditorialConfigLoader:
 
     @property
     def path(self) -> Path:
-        raw = str(os.getenv(self.env_var, self.default_relpath)).strip()
-        p = Path(raw)
-        return p if p.is_absolute() else (Path.cwd() / p).resolve()
+        raw = str(os.getenv(self.env_var, self.default_relpath) or "").strip()
+        if not raw:
+            raw = self.default_relpath
+
+        p = Path(raw).expanduser()
+        if p.is_absolute():
+            return p.resolve()
+
+        project_root = ProjectPaths.discover().root
+        return (project_root / p).resolve()
 
     def load(self) -> EditorialConfig:
         return load_editorial_config_from_path(self.path)
@@ -138,7 +150,7 @@ def resolve_model_pool(pool: ModelPool) -> list[str]:
     Returns:
         list[str]: Resolved model list, deduped and non empty strings only.
     """
-    if pool.env_override:
+    if getattr(pool, "env_override", None):
         raw = os.getenv(pool.env_override, "")
         models = _parse_env_models(raw)
         if models:
@@ -146,7 +158,9 @@ def resolve_model_pool(pool: ModelPool) -> list[str]:
             return models
         if str(raw).strip():
             logger.error(f"Env override inválido em {pool.env_override}, a usar config")
-    return list(pool.models)
+    primary = list(getattr(pool, "primary", []) or [])
+    fallback = list(getattr(pool, "fallback", []) or [])
+    return [m for m in (primary + fallback) if str(m).strip()]
 
 
 _LOADER = EditorialConfigLoader()

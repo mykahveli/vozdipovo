@@ -123,7 +123,11 @@ def director_assess(
             "positivity_score",
             "justification",
         ],
+        corr_id=f"director:{(title or '')[:40]}",
     )
+
+    if not res.ok or not isinstance(res.parsed_json, dict):
+        raise RuntimeError(res.error or "Falha no Director")
 
     scores = DirectorScores.model_validate(res.parsed_json)
     scores_dict = (
